@@ -394,9 +394,9 @@ fn main() -> Result<()> {
                             // fn next_id() -> u64 {
                             //     COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                             // }
-                            // let line_start = text_edit.rope.line_to_char(line);
-                            // let char_index = line_start + col;
                             // let pasta = format!("(Paste: {})", next_id());
+                            let line_start = text_edit.rope.line_to_char(line);
+                            let char_index = line_start + col;
                             text_edit.rope.try_insert(char_index, &pasta);
                             let mut new_line = line;
                             let mut new_col = col;
