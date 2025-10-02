@@ -390,14 +390,13 @@ fn main() -> Result<()> {
                             }
                         }
                         Event::Paste(pasta) => {
-                            panic!();
-                            static COUNTER: AtomicU64 = AtomicU64::new(0);
-                            fn next_id() -> u64 {
-                                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            }
-                            let line_start = text_edit.rope.line_to_char(line);
-                            let char_index = line_start + col;
-                            let pasta = format!("(Paste: {})", next_id());
+                            // static COUNTER: AtomicU64 = AtomicU64::new(0);
+                            // fn next_id() -> u64 {
+                            //     COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            // }
+                            // let line_start = text_edit.rope.line_to_char(line);
+                            // let char_index = line_start + col;
+                            // let pasta = format!("(Paste: {})", next_id());
                             text_edit.rope.try_insert(char_index, &pasta);
                             let mut new_line = line;
                             let mut new_col = col;
