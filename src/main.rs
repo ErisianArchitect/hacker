@@ -1,7 +1,7 @@
 #![allow(unused)]
 use color_eyre::Result;
 use std::{io::Write, sync::atomic::AtomicU64};
-use hacker::{game_loop::{self, GameEvent, GameSettings, LoopContext}, text_edit::{TextEdit, TextEditor}};
+use hacker::{app::{self, AppEvent, AppSettings, Context, FrameRate}, text_edit::{TextEdit, TextEditor}};
 use ratatui::{prelude::*, widgets::{self, Block, Borders, Paragraph}, DefaultTerminal};
 use crossterm::{event::{self, Event, KeyCode, KeyModifiers, MouseEventKind}, terminal::Clear};
 use crossterm::execute;
@@ -33,28 +33,46 @@ fn main() -> Result<()> {
     const FRAME_TIME_MS: u64 = 16;
     const FRAME_TIME: Duration = Duration::from_millis(FRAME_TIME_MS);
     
-    const SHORT_SCROLL: usize = 2;
+    const SHORT_SCROLL: usize = 1;
     const LONG_SCROLL: usize = 10;
     let mut last_update_time = Instant::now() - FRAME_TIME;
     let mut text_edit = TextEditor::new();
     let mut line = 0usize;
     let mut col = 0usize;
     let mut max_prev_col = col;
-    game_loop::run(
-        GameSettings {
-            render_frametime: FRAME_TIME,
-            update_frametime: FRAME_TIME,
+    app::run(
+        AppSettings {
+            render_framerate: FrameRate::OnDemand,
+            update_framerate: FrameRate::OnDemand,
         },
-        move |terminal: &mut DefaultTerminal, event: GameEvent, context: &LoopContext| -> Result<(), std::io::Error> {
+        move |terminal: &mut DefaultTerminal, event: AppEvent, context: &Context| -> Result<(), std::io::Error> {
             macro_rules! execute {
                 ($($tokens:tt)*) => {
                     crossterm::execute!(terminal.backend_mut(), $($tokens)*)?
                 };
             }
             let term_size = terminal.size()?;
-            let (cx, cy) = get_cursor_pos()?;
+            let max_col = text_edit.start_col + term_size.width as usize;
+            let max_line = text_edit.start_line + term_size.height as usize;
+            let (cx, cy) = (
+                if col < text_edit.start_col {
+                    0
+                } else if col >= max_col {
+                    term_size.width - 1
+                } else {
+                    (col - text_edit.start_col) as u16
+                },
+                if line < text_edit.start_line {
+                    0
+                } else if line >= max_line {
+                    term_size.height - 1
+                } else {
+                    (line - text_edit.start_line) as u16
+                }
+            );
+            
             match event {
-                GameEvent::TermEvent(event) => {
+                AppEvent::TermEvent(event) => {
                     match event {
                         Event::Key(key_event) if key_event.is_press() => match key_event.code {
                             KeyCode::Up => {
@@ -81,6 +99,7 @@ fn main() -> Result<()> {
                                     text_edit.start_col = 0;
                                     execute!(MoveTo(0, cy));
                                 }
+                                context.request_redraw();
                             },
                             KeyCode::Down => {
                                 if line + 1 != text_edit.rope.len_lines() {
@@ -112,6 +131,7 @@ fn main() -> Result<()> {
                                     let ncx = col - text_edit.start_col;
                                     execute!(MoveTo(ncx as u16, cy));
                                 }
+                                context.request_redraw();
                             },
                             KeyCode::Left => {
                                 if col != 0 {
@@ -153,6 +173,7 @@ fn main() -> Result<()> {
                                         }
                                     }
                                 }
+                                context.request_redraw();
                                 max_prev_col = col;
                             },
                             KeyCode::Right => {
@@ -182,20 +203,35 @@ fn main() -> Result<()> {
                                     }
                                     max_prev_col = col;
                                 }
+                                context.request_redraw();
                             },
-                            KeyCode::Esc => context.request_exit(game_loop::ExitRequest::Success),
+                            KeyCode::Esc => context.request_exit(app::ExitRequest::Success),
                             KeyCode::Char('q') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                                context.request_exit(game_loop::ExitRequest::Success);
+                                context.request_exit(app::ExitRequest::Success);
                             }
                             KeyCode::Delete => {
                                 let line_start = text_edit.rope.line_to_char(line);
                                 let char_index = line_start + col;
                                 text_edit.rope.try_remove(char_index..=char_index);
+                                context.request_redraw();
                             }
                             KeyCode::Backspace => {
                                 if (col > 0 || line != 0) && line < text_edit.rope.len_lines() {
                                     let line_start = text_edit.rope.line_to_char(line);
                                     let char_index = line_start + col;
+                                    // all spaces.
+                                    if col != 0 && text_edit.rope.line(line).char(col - 1) == ' '
+                                    && text_edit.rope.line(line).chars().take(col - 1).all(|c| c == ' ') {
+                                        let prev_indent = col.next_multiple_of(4) - 4;
+                                        let prev_char_index = line_start + prev_indent;
+                                        text_edit.rope.remove(prev_char_index..char_index);
+                                        col = prev_indent;
+                                        if col < text_edit.start_col {
+                                            text_edit.start_col = col;
+                                        }
+                                        context.request_redraw();
+                                        return Ok(());
+                                    }
                                     if char_index != 0 && char_index <= text_edit.rope.len_chars() {
                                         if col != 0 {
                                             col -= 1;
@@ -241,15 +277,76 @@ fn main() -> Result<()> {
                                         }
                                     }
                                 }
+                                context.request_redraw();
                                 max_prev_col = col;
                             }
                             KeyCode::Home => {
-                                col = 0;
-                                text_edit.start_col = 0;
-                                max_prev_col = col;
-                                execute!(MoveTo(0, cy));
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                                    col = 0;
+                                    line = 0;
+                                    text_edit.start_col = 0;
+                                    text_edit.start_line = 0;
+                                    max_prev_col = col;
+                                    context.request_redraw();
+                                    return Ok(());
+                                }
+                                if col != 0 {
+                                    let line_start = text_edit.rope.line_to_char(line);
+                                    let char_index = line_start + col;
+                                    if text_edit.rope.line(line).char(col - 1) == ' '
+                                    && text_edit.rope.line(line).chars().take(col - 1).all(|c| c == ' ') {
+                                        col = 0;
+                                        if col < text_edit.start_col {
+                                            text_edit.start_col = col;
+                                        }
+                                        context.request_redraw();
+                                    } else {
+                                        if let Some((indent_len, _)) = text_edit.rope.line(line).chars().enumerate().find(|&(i, c)| c != ' ') {
+                                            col = indent_len;
+                                            context.request_redraw();
+                                        } else {
+                                            col = 0;
+                                            text_edit.start_col = 0;
+                                            context.request_redraw();
+                                        }
+                                    }
+                                    max_prev_col = col;
+                                    return Ok(());
+                                } else {
+                                    let line_start = text_edit.rope.line_to_char(line);
+                                    if let Some((indent_len, _)) = text_edit.rope.line(line).chars().enumerate().find(|&(i, c)| c != ' ') {
+                                        col = indent_len;
+                                        context.request_redraw();
+                                    }
+                                    max_prev_col = col;
+                                    return Ok(());
+                                }
                             }
                             KeyCode::End => {
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                                    let end = text_edit.rope.len_chars();
+                                    if end == 0 {
+                                        return Ok(());
+                                    }
+                                    let end_line = text_edit.rope.char_to_line(end);
+                                    let end_line_start = text_edit.rope.line_to_char(end_line);
+                                    col = end - end_line_start;
+                                    line = end_line;
+                                    if col < text_edit.start_col {
+                                        text_edit.start_col = col;
+                                    }else if col >= text_edit.start_col + term_size.width as usize {
+                                        text_edit.start_col = col + 1 - term_size.width as usize;
+                                    }
+                                    // not likely, unless an error.
+                                    if line < text_edit.start_line {
+                                        text_edit.start_line = line;
+                                    } else if line >= text_edit.start_line + term_size.height as usize {
+                                        text_edit.start_line = line + 1 - term_size.height as usize;
+                                    }
+                                    max_prev_col = col;
+                                    context.request_redraw();
+                                    return Ok(());
+                                }
                                 let line_slice = text_edit.rope.line(line);
                                 let mut line_len = line_slice.len_chars();
                                 while line_len != 0 && matches!(line_slice.char(line_len - 1), '\n' | '\r') {
@@ -262,6 +359,7 @@ fn main() -> Result<()> {
                                 let ncx = col - text_edit.start_col;
                                 max_prev_col = col;
                                 execute!(MoveTo(ncx as u16, cy));
+                                context.request_redraw();
                             }
                             KeyCode::Tab => {
                                 let next_indent = (col + 1).next_multiple_of(4);
@@ -278,6 +376,7 @@ fn main() -> Result<()> {
                                     execute!(MoveTo(ncx as u16, cy));
                                     max_prev_col = col;
                                 }
+                                context.request_redraw();
                             }
                             KeyCode::Enter => {
                                 let line_start = text_edit.rope.line_to_char(line);
@@ -294,6 +393,7 @@ fn main() -> Result<()> {
                                     }
                                     max_prev_col = col;
                                 }
+                                context.request_redraw();
                             }
                             KeyCode::Char(chr) if chr != '\n' => {
                                 if line <= text_edit.rope.len_lines() {
@@ -308,6 +408,7 @@ fn main() -> Result<()> {
                                     }
                                     max_prev_col = col;
                                 }
+                                context.request_redraw();
                             }
                             _ => (),
                         }
@@ -336,6 +437,7 @@ fn main() -> Result<()> {
                                     } else {
                                         text_edit.start_line += scroll;
                                     }
+                                    context.request_redraw();
                                 },
                                 MouseEventKind::ScrollUp => {
                                     let scroll = if mouse_event.modifiers.contains(KeyModifiers::ALT) {
@@ -356,6 +458,7 @@ fn main() -> Result<()> {
                                             text_edit.start_line = 0;
                                         }
                                     }
+                                    context.request_redraw();
                                 },
                                 MouseEventKind::ScrollLeft => {
                                     let scroll = if mouse_event.modifiers.contains(KeyModifiers::ALT) {
@@ -368,6 +471,7 @@ fn main() -> Result<()> {
                                     } else {
                                         text_edit.start_col = 0;
                                     }
+                                    context.request_redraw();
                                 },
                                 MouseEventKind::ScrollRight => {
                                     let scroll = if mouse_event.modifiers.contains(KeyModifiers::ALT) {
@@ -376,6 +480,7 @@ fn main() -> Result<()> {
                                         SHORT_SCROLL
                                     };
                                     text_edit.start_col += scroll;
+                                    context.request_redraw();
                                 },
                             }
                         }
@@ -388,53 +493,102 @@ fn main() -> Result<()> {
                             if line > text_edit.start_line + height {
                                 text_edit.start_line = line - height;
                             }
+                            context.request_redraw();
                         }
                         Event::Paste(pasta) => {
-                            // static COUNTER: AtomicU64 = AtomicU64::new(0);
-                            // fn next_id() -> u64 {
-                            //     COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            // }
-                            // let pasta = format!("(Paste: {})", next_id());
                             let line_start = text_edit.rope.line_to_char(line);
                             let char_index = line_start + col;
-                            text_edit.rope.try_insert(char_index, &pasta);
+                            let mut new_text = String::with_capacity(pasta.len());
+                            let mut last_char = None;
+                            for chr in pasta.chars() {
+                                match (last_char, chr) {
+                                    (Some('\n'), '\r') => {
+                                        new_text.push('\n');
+                                        last_char = None;
+                                    }
+                                    (Some('\n'), '\n') => {
+                                        new_text.push('\n');
+                                        last_char = Some('\n');
+                                    }
+                                    (Some('\n'), c) => {
+                                        new_text.push('\n');
+                                        new_text.push(c);
+                                        last_char = Some(c);
+                                    }
+                                    (Some('\r'), '\n') => {
+                                        new_text.push('\n');
+                                        last_char = None;
+                                    }
+                                    (Some('\r'), '\r') => {
+                                        new_text.push('\n');
+                                        last_char = Some('\r');
+                                    }
+                                    (Some('\r'), c) => {
+                                        new_text.push('\n');
+                                        new_text.push(c);
+                                        last_char = Some(c);
+                                    }
+                                    (Some(old_c), '\n') => {
+                                        last_char = Some('\n');
+                                    }
+                                    (Some(old_c), '\r') => {
+                                        last_char = Some('\r');
+                                    }
+                                    (Some(old_c), new_c) => {
+                                        new_text.push(new_c);
+                                        last_char = Some(new_c);
+                                    }
+                                    (None, c) => {
+                                        new_text.push(c);
+                                        last_char = Some(c);
+                                    }
+                                }
+                            }
+                            text_edit.rope.try_insert(char_index, &new_text);
                             let mut new_line = line;
                             let mut new_col = col;
-                            for chr in pasta.chars() {
+                            let mut found_n = false;
+                            for chr in new_text.chars() {
                                 match chr {
                                     '\n' => {
                                         new_col = 0;
                                         new_line += 1;
                                     }
                                     '\r' => continue,
-                                    c => new_col += 1,
+                                    c => {
+                                        new_col += 1;
+                                    },
                                 }
                             }
                             line = new_line;
                             col = new_col;
                             max_prev_col = col;
                             let bottom = text_edit.start_line + term_size.height as usize;
-                            text_edit.start_line = text_edit.start_line
-                                .min(line)
-                                .max(line - term_size.height as usize);
-                            text_edit.start_col = text_edit.start_col
-                                .min(col)
-                                .max(col + 1 - term_size.width as usize);
+                            text_edit.start_line = text_edit.start_line.min(line);
+                            if line >= text_edit.start_line + term_size.height as usize {
+                                text_edit.start_line = line - (term_size.height as usize - 1);
+                            }
+                            text_edit.start_col = text_edit.start_col.min(col);
+                            if col >= text_edit.start_col + term_size.width as usize {
+                                text_edit.start_col = col - (term_size.width as usize - 1);
+                            }
                             let ncx = col - text_edit.start_col;
                             let ncy = line - text_edit.start_line;
-                            execute!(MoveTo(ncx as u16, ncy as u16));
-                            context.request_render();
+                            // execute!(MoveTo(ncx as u16, ncy as u16));
+                            context.request_redraw();
                         }
                         _ => (),
                     }
                 },
-                GameEvent::Begin(game_settings) => {
+                AppEvent::Begin(game_settings) => {
                     execute!(MoveTo(0, 0));
+                    context.request_redraw();
                 },
-                GameEvent::Update => {
+                AppEvent::Update => {
                     
                 },
-                GameEvent::Render => {
+                AppEvent::Render => {
+                    // terminal.clear();
                     terminal.draw(|frame| {
                         frame.buffer_mut().reset();
                         let area = frame.area();
@@ -443,15 +597,14 @@ fn main() -> Result<()> {
                         frame.render_stateful_widget(TextEdit, area, &mut text_edit);
                         // let info = format!("start_line: {} start_col: {} line: {} col: {}, cx: {cx}, cy: {cy}", text_edit.start_line, text_edit.start_col, line, col);
                         // frame.render_widget(info, display_area);
-                        
                     })?;
                     execute!(Show);
                     execute!(MoveTo(cx, cy));
                 },
-                GameEvent::ExitRequested(cancellable_exit_request) => {
+                AppEvent::ExitRequested(cancellable_exit_request) => {
                     
                 },
-                GameEvent::Exiting => {
+                AppEvent::Exiting => {
                     
                 },
             }

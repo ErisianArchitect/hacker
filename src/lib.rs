@@ -1,4 +1,3 @@
-pub mod context;
-pub mod game_loop;
+pub mod app;
 pub mod hashing;
 pub mod text_edit;
